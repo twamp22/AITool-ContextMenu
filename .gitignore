@@ -3,6 +3,7 @@ src/*.dll
 src/*.obj
 src/*.exp
 src/*.lib
+src/*.stale
 
 # Legacy auto-generated header (pre-refactor — should not exist in new layout)
 claude_path.h

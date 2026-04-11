@@ -246,22 +246,38 @@ function Build-ToolDll {
 function Install-ToolArtifacts {
     param($Paths, [string]$DllSrcPath)
 
-    # Stop explorer if DLL is locked at the destination
-    if (Test-Path $Paths.InstallDir) {
-        $dllDest = Join-Path $Paths.InstallDir "AIToolContextMenu.dll"
-        if (Test-Path $dllDest) {
-            try { [IO.File]::OpenWrite($dllDest).Close() }
-            catch {
-                Write-Host "  DLL locked. Restarting Explorer..." -ForegroundColor Yellow
-                Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-                Start-Sleep -Seconds 2
+    if (-not (Test-Path $Paths.InstallDir)) {
+        New-Item -ItemType Directory -Path $Paths.InstallDir -Force | Out-Null
+    }
+
+    # If the destination DLL is already there and possibly loaded by explorer,
+    # rename it out of the way so we can write a fresh copy. Renaming a locked
+    # DLL works on NTFS because MoveFile updates the directory entry while the
+    # existing open handle keeps pointing at the underlying file blob.
+    $dllDest = Join-Path $Paths.InstallDir "AIToolContextMenu.dll"
+    if (Test-Path $dllDest) {
+        $stale = "$dllDest.$([Guid]::NewGuid().ToString('N')).stale"
+        try {
+            Move-Item -Path $dllDest -Destination $stale -Force -ErrorAction Stop
+        } catch {
+            # Rename failed — fall back to stopping explorer. Give it more
+            # time than the old 2s because Windows 11 auto-restarts explorer
+            # quickly and can re-lock the file.
+            Write-Host "  DLL locked and rename failed. Restarting Explorer..." -ForegroundColor Yellow
+            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            try { Move-Item -Path $dllDest -Destination $stale -Force -ErrorAction Stop } catch {
+                throw "Could not displace locked DLL at $dllDest — close File Explorer windows and retry."
             }
         }
     }
 
-    if (-not (Test-Path $Paths.InstallDir)) {
-        New-Item -ItemType Directory -Path $Paths.InstallDir -Force | Out-Null
-    }
+    # Clean up any prior .stale files best-effort (explorer may have released them by now)
+    Get-ChildItem -Path $Paths.InstallDir -Filter "AIToolContextMenu.dll.*.stale" -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            try { Remove-Item -Path $_.FullName -Force -ErrorAction Stop } catch {}
+        }
+
     Copy-Item $DllSrcPath $Paths.InstallDir -Force
     Write-Host "  Copied DLL to $($Paths.InstallDir)" -ForegroundColor Green
 
