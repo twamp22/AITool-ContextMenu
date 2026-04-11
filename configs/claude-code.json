@@ -1,0 +1,29 @@
+{
+  "toolSlug": "claude-code",
+  "toolName": "Claude Code",
+  "executable": "claude.exe",
+  "guid": "E3C26D71-5A2F-4B89-9C7E-A1D3F6B84E52",
+  "packageName": "ClaudeCode.ContextMenu",
+  "publisher": "CN=ClaudeCodeDev",
+  "parentMenu": {
+    "title": "Claude Code",
+    "tooltip": "Claude Code options"
+  },
+  "menuItems": [
+    {
+      "title": "Open (Default)",
+      "tooltip": "Launch Claude Code in this folder",
+      "args": ""
+    },
+    {
+      "title": "Open (Auto)",
+      "tooltip": "Launch Claude Code with --enable-auto-mode",
+      "args": "--enable-auto-mode"
+    },
+    {
+      "title": "Open (YOLO)",
+      "tooltip": "Launch Claude Code with --dangerously-skip-permissions",
+      "args": "--dangerously-skip-permissions"
+    }
+  ]
+}

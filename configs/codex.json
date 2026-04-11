@@ -1,0 +1,22 @@
+{
+  "toolSlug": "codex",
+  "toolName": "Codex",
+  "executable": "codex.exe",
+  "publisher": "CN=AIToolContextMenuDev",
+  "parentMenu": {
+    "title": "Codex",
+    "tooltip": "OpenAI Codex options"
+  },
+  "menuItems": [
+    {
+      "title": "Open (Default)",
+      "tooltip": "Launch Codex in this folder",
+      "args": ""
+    },
+    {
+      "title": "Open (Auto-approve)",
+      "tooltip": "Launch Codex with --auto-approve",
+      "args": "--auto-approve"
+    }
+  ]
+}
