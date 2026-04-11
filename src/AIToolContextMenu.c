@@ -5,12 +5,7 @@
 #include <shlobj.h>
 #include <shlwapi.h>
 
-/* ── GUIDs ───────────────────────────────────────────────────────────── */
-/* {E3C26D71-5A2F-4B89-9C7E-A1D3F6B84E52} - parent "Claude Code" menu */
-static const CLSID CLSID_ClaudeCode = {
-    0xE3C26D71, 0x5A2F, 0x4B89,
-    {0x9C, 0x7E, 0xA1, 0xD3, 0xF6, 0xB8, 0x4E, 0x52}
-};
+#include "tool_config.h"
 
 /* IEnumExplorerCommand {a88826f8-186f-4987-aade-ea0cef8fbfe8} */
 static const IID IID_IEnumExplorerCommand = {
@@ -18,15 +13,7 @@ static const IID IID_IEnumExplorerCommand = {
     {0xaa, 0xde, 0xea, 0x0c, 0xef, 0x8f, 0xbf, 0xe8}
 };
 
-/* Path injected at compile time via claude_path.h; falls back to bare name (PATH lookup) */
-#ifdef CLAUDE_PATH_H
-#  include "claude_path.h"
-#endif
-#ifndef CLAUDE_EXE_PATH
-#  define CLAUDE_EXE_PATH L"claude.exe"
-#endif
-
-static const wchar_t CLAUDE_EXE[] = CLAUDE_EXE_PATH;
+static const wchar_t TOOL_EXE[] = TOOL_EXE_PATH;
 static LONG g_dllRef = 0;
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
@@ -47,14 +34,14 @@ static wchar_t *GetFolderFromShellItems(IShellItemArray *psia) {
     return buf;
 }
 
-static void LaunchClaude(IShellItemArray *psia, const wchar_t *extraArgs) {
+static void LaunchTool(IShellItemArray *psia, const wchar_t *extraArgs) {
     wchar_t *folder = GetFolderFromShellItems(psia);
     wchar_t cmdLine[1024];
 
     if (extraArgs && extraArgs[0])
-        wsprintfW(cmdLine, L"cmd.exe /k \"\"%s\" %s\"", CLAUDE_EXE, extraArgs);
+        wsprintfW(cmdLine, L"cmd.exe /k \"\"%s\" %s\"", TOOL_EXE, extraArgs);
     else
-        wsprintfW(cmdLine, L"cmd.exe /k \"\"%s\"\"", CLAUDE_EXE);
+        wsprintfW(cmdLine, L"cmd.exe /k \"\"%s\"\"", TOOL_EXE);
 
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = {0};
@@ -73,7 +60,7 @@ typedef struct {
     LONG                  refCount;
     const wchar_t        *title;
     const wchar_t        *tooltip;
-    const wchar_t        *args;   /* extra CLI args, or NULL */
+    const wchar_t        *args;  /* NULL = no extra args */
 } SubCommand;
 
 static HRESULT STDMETHODCALLTYPE Sub_QI(IExplorerCommand *This, REFIID riid, void **ppv) {
@@ -101,7 +88,7 @@ static HRESULT STDMETHODCALLTYPE Sub_GetTitle(IExplorerCommand *This, IShellItem
 static HRESULT STDMETHODCALLTYPE Sub_GetIcon(IExplorerCommand *This, IShellItemArray *p, LPWSTR *out) {
     (void)This; (void)p;
     wchar_t buf[MAX_PATH + 8];
-    wsprintfW(buf, L"%s,0", CLAUDE_EXE);
+    wsprintfW(buf, L"%s,0", TOOL_EXE);
     return SHStrDupW(buf, out);
 }
 
@@ -110,7 +97,7 @@ static HRESULT STDMETHODCALLTYPE Sub_GetToolTip(IExplorerCommand *This, IShellIt
 }
 
 static HRESULT STDMETHODCALLTYPE Sub_GetCanonicalName(IExplorerCommand *This, GUID *g) {
-    (void)This; *g = CLSID_ClaudeCode; return S_OK;
+    (void)This; *g = CLSID_Tool; return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE Sub_GetState(IExplorerCommand *This, IShellItemArray *p, BOOL b, EXPCMDSTATE *s) {
@@ -119,7 +106,7 @@ static HRESULT STDMETHODCALLTYPE Sub_GetState(IExplorerCommand *This, IShellItem
 
 static HRESULT STDMETHODCALLTYPE Sub_Invoke(IExplorerCommand *This, IShellItemArray *psia, IBindCtx *pbc) {
     (void)pbc;
-    LaunchClaude(psia, ((SubCommand *)This)->args);
+    LaunchTool(psia, ((SubCommand *)This)->args);
     return S_OK;
 }
 
@@ -151,10 +138,8 @@ static SubCommand *CreateSubCommand(const wchar_t *title, const wchar_t *tooltip
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
-   IEnumExplorerCommand — enumerates the sub-commands
+   IEnumExplorerCommand — enumerates the sub-commands from g_menuItems
    ═══════════════════════════════════════════════════════════════════════ */
-
-#define NUM_SUBCMDS 3
 
 typedef struct {
     IEnumExplorerCommandVtbl *lpVtbl;
@@ -186,31 +171,11 @@ static HRESULT STDMETHODCALLTYPE Enum_Next(IEnumExplorerCommand *This,
     SubCmdEnum *e = (SubCmdEnum *)This;
     ULONG fetched = 0;
 
-    while (fetched < celt && e->index < NUM_SUBCMDS) {
-        SubCommand *sc = NULL;
-        switch (e->index) {
-        case 0:
-            sc = CreateSubCommand(
-                L"Open (Default)",
-                L"Launch Claude Code in this folder",
-                NULL);
-            break;
-        case 1:
-            sc = CreateSubCommand(
-                L"Open (Auto)",
-                L"Launch Claude Code with auto mode (AI-managed permissions)",
-                L"--enable-auto-mode");
-            break;
-        case 2:
-            sc = CreateSubCommand(
-                L"Open (YOLO)",
-                L"Launch Claude Code with --dangerously-skip-permissions",
-                L"--dangerously-skip-permissions");
-            break;
-        }
+    while (fetched < celt && e->index < NUM_MENU_ITEMS) {
+        const MenuItemDef *def = &g_menuItems[e->index];
+        SubCommand *sc = CreateSubCommand(def->title, def->tooltip, def->args);
         if (!sc) break;
-        pUICommand[fetched] = (IExplorerCommand *)sc;
-        fetched++;
+        pUICommand[fetched++] = (IExplorerCommand *)sc;
         e->index++;
     }
     if (pceltFetched) *pceltFetched = fetched;
@@ -220,7 +185,7 @@ static HRESULT STDMETHODCALLTYPE Enum_Next(IEnumExplorerCommand *This,
 static HRESULT STDMETHODCALLTYPE Enum_Skip(IEnumExplorerCommand *This, ULONG celt) {
     SubCmdEnum *e = (SubCmdEnum *)This;
     e->index += celt;
-    return (e->index <= NUM_SUBCMDS) ? S_OK : S_FALSE;
+    return (e->index <= NUM_MENU_ITEMS) ? S_OK : S_FALSE;
 }
 
 static HRESULT STDMETHODCALLTYPE Enum_Reset(IEnumExplorerCommand *This) {
@@ -247,7 +212,7 @@ static SubCmdEnum *CreateEnum(void) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
-   Parent IExplorerCommand — the "Claude Code" dropdown
+   Parent IExplorerCommand — the tool-specific dropdown
    ═══════════════════════════════════════════════════════════════════════ */
 
 typedef struct {
@@ -274,22 +239,22 @@ static ULONG STDMETHODCALLTYPE Par_Release(IExplorerCommand *This) {
 }
 
 static HRESULT STDMETHODCALLTYPE Par_GetTitle(IExplorerCommand *This, IShellItemArray *p, LPWSTR *out) {
-    (void)This; (void)p; return SHStrDupW(L"Claude Code", out);
+    (void)This; (void)p; return SHStrDupW(TOOL_PARENT_TITLE, out);
 }
 
 static HRESULT STDMETHODCALLTYPE Par_GetIcon(IExplorerCommand *This, IShellItemArray *p, LPWSTR *out) {
     (void)This; (void)p;
     wchar_t buf[MAX_PATH + 8];
-    wsprintfW(buf, L"%s,0", CLAUDE_EXE);
+    wsprintfW(buf, L"%s,0", TOOL_EXE);
     return SHStrDupW(buf, out);
 }
 
 static HRESULT STDMETHODCALLTYPE Par_GetToolTip(IExplorerCommand *This, IShellItemArray *p, LPWSTR *out) {
-    (void)This; (void)p; return SHStrDupW(L"Claude Code options", out);
+    (void)This; (void)p; return SHStrDupW(TOOL_PARENT_TOOLTIP, out);
 }
 
 static HRESULT STDMETHODCALLTYPE Par_GetCanonicalName(IExplorerCommand *This, GUID *g) {
-    (void)This; *g = CLSID_ClaudeCode; return S_OK;
+    (void)This; *g = CLSID_Tool; return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE Par_GetState(IExplorerCommand *This, IShellItemArray *p, BOOL b, EXPCMDSTATE *s) {
@@ -297,7 +262,7 @@ static HRESULT STDMETHODCALLTYPE Par_GetState(IExplorerCommand *This, IShellItem
 }
 
 static HRESULT STDMETHODCALLTYPE Par_Invoke(IExplorerCommand *This, IShellItemArray *p, IBindCtx *b) {
-    (void)This; (void)p; (void)b; return E_NOTIMPL; /* parent is a container, not invokable */
+    (void)This; (void)p; (void)b; return E_NOTIMPL;
 }
 
 static HRESULT STDMETHODCALLTYPE Par_GetFlags(IExplorerCommand *This, EXPCMDFLAGS *f) {
@@ -323,7 +288,7 @@ static IExplorerCommandVtbl g_ParVtbl = {
    IClassFactory
    ═══════════════════════════════════════════════════════════════════════ */
 
-typedef struct { IClassFactoryVtbl *lpVtbl; } ClaudeCodeFactory;
+typedef struct { IClassFactoryVtbl *lpVtbl; } ToolFactory;
 
 static HRESULT STDMETHODCALLTYPE CF_QI(IClassFactory *This, REFIID riid, void **ppv) {
     if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IClassFactory)) {
@@ -357,14 +322,14 @@ static HRESULT STDMETHODCALLTYPE CF_LockServer(IClassFactory *This, BOOL fLock) 
 }
 
 static IClassFactoryVtbl g_CFVtbl = { CF_QI, CF_AddRef, CF_Release, CF_CreateInstance, CF_LockServer };
-static ClaudeCodeFactory g_Factory = { &g_CFVtbl };
+static ToolFactory g_Factory = { &g_CFVtbl };
 
 /* ═══════════════════════════════════════════════════════════════════════
    DLL exports
    ═══════════════════════════════════════════════════════════════════════ */
 
 STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void **ppv) {
-    if (IsEqualCLSID(rclsid, &CLSID_ClaudeCode))
+    if (IsEqualCLSID(rclsid, &CLSID_Tool))
         return CF_QI((IClassFactory *)&g_Factory, riid, ppv);
     *ppv = NULL;
     return CLASS_E_CLASSNOTAVAILABLE;

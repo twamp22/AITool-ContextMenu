@@ -1,4 +1,4 @@
-LIBRARY ClaudeCodeContextMenu
+LIBRARY AIToolContextMenu
 EXPORTS
     DllGetClassObject   PRIVATE
     DllCanUnloadNow     PRIVATE

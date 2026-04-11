@@ -11,9 +11,11 @@ if not defined VSDIR (
 call "%VSDIR%\VC\Auxiliary\Build\vcvarsall.bat" amd64 >nul 2>nul
 cd /d "%~dp0"
 
-REM Include claude_path.h if it exists
-set "EXTRA_FLAGS="
-if exist claude_path.h set "EXTRA_FLAGS=/DCLAUDE_PATH_H"
+if not exist tool_config.h (
+    echo ERROR: tool_config.h not found. Run install.ps1 from the repo root, or
+    echo        ensure the committed dev stub exists in src\.
+    exit /b 1
+)
 
-cl /LD /O2 %EXTRA_FLAGS% ClaudeCodeContextMenu.c /link /DEF:ClaudeCodeContextMenu.def ole32.lib shell32.lib shlwapi.lib uuid.lib user32.lib
-if exist ClaudeCodeContextMenu.dll (echo BUILD_SUCCESS) else (echo BUILD_FAILED)
+cl /LD /O2 AIToolContextMenu.c /link /DEF:AIToolContextMenu.def ole32.lib shell32.lib shlwapi.lib uuid.lib user32.lib
+if exist AIToolContextMenu.dll (echo BUILD_SUCCESS) else (echo BUILD_FAILED)
