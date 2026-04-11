@@ -1,13 +1,12 @@
 # Build artifacts
-*.dll
-*.obj
-*.lib
-*.exp
-*.pdb
-*.msix
+src/*.dll
+src/*.obj
+src/*.exp
+src/*.lib
 
-# Generated at build time
+# Legacy auto-generated header (pre-refactor — should not exist in new layout)
 claude_path.h
+src/claude_path.h
 
-# Old .NET project
-ClaudeCodeContextMenu/
+# MSIX build artifacts
+*.msix
