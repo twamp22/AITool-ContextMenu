@@ -388,6 +388,83 @@ function Write-AppxManifest {
     Write-Host "  Generated AppxManifest.xml" -ForegroundColor Green
 }
 
+# ─── SDK tool lookup ──────────────────────────────────────────────────────
+function Find-SdkBin {
+    $kitsRoot = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots" -ErrorAction SilentlyContinue).KitsRoot10
+    if (-not $kitsRoot) { throw "Windows SDK not found. Install the Windows 10/11 SDK." }
+    $ver = Get-ChildItem (Join-Path $kitsRoot "bin") -Directory |
+        Where-Object { $_.Name -match '^\d+\.' } |
+        Sort-Object Name -Descending | Select-Object -First 1
+    if (-not $ver) { throw "No SDK version found under $kitsRoot\bin" }
+    return Join-Path $kitsRoot "bin\$($ver.Name)\x64"
+}
+
+# ─── Signing cert ─────────────────────────────────────────────────────────
+function Ensure-SigningCert {
+    param($Paths)
+    Write-Host "Setting up signing certificate..." -ForegroundColor Cyan
+    $cert = Get-ChildItem Cert:\CurrentUser\My |
+        Where-Object { $_.Subject -eq $Paths.Publisher -and $_.FriendlyName -eq $Paths.CertFriendly } |
+        Select-Object -First 1
+
+    if (-not $cert) {
+        $cert = New-SelfSignedCertificate `
+            -Type Custom -Subject $Paths.Publisher `
+            -KeyUsage DigitalSignature `
+            -FriendlyName $Paths.CertFriendly `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+        Write-Host "  Created signing certificate." -ForegroundColor Green
+    } else {
+        Write-Host "  Reusing existing certificate." -ForegroundColor Green
+    }
+
+    $trusted = Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object { $_.Thumbprint -eq $cert.Thumbprint }
+    if (-not $trusted) {
+        $tmpCer = Join-Path $env:TEMP "$($Paths.Slug)_dev.cer"
+        Export-Certificate -Cert $cert -FilePath $tmpCer | Out-Null
+        Import-Certificate -FilePath $tmpCer -CertStoreLocation "Cert:\LocalMachine\TrustedPeople" | Out-Null
+        Remove-Item $tmpCer -Force
+        Write-Host "  Certificate trusted." -ForegroundColor Green
+    }
+    return $cert
+}
+
+# ─── Pack, sign, register ─────────────────────────────────────────────────
+function Pack-AndRegisterMsix {
+    param($Paths, $Cert)
+
+    $sdkBin   = Find-SdkBin
+    $makeAppx = Join-Path $sdkBin "makeappx.exe"
+    $signTool = Join-Path $sdkBin "signtool.exe"
+    foreach ($tool in @($makeAppx, $signTool)) {
+        if (-not (Test-Path $tool)) { throw "Missing SDK tool: $tool" }
+    }
+
+    $existing = Get-AppxPackage -Name $Paths.PackageName -ErrorAction SilentlyContinue
+    if ($existing) {
+        Remove-AppxPackage $existing
+        Write-Host "  Removed previous package." -ForegroundColor Green
+    }
+
+    Write-Host "Creating MSIX package..." -ForegroundColor Cyan
+    $msixPath = Join-Path $env:TEMP "$($Paths.Slug).msix"
+    if (Test-Path $msixPath) { Remove-Item $msixPath -Force }
+
+    $packArgs = @("pack", "/d", "`"$($Paths.InstallDir)`"", "/p", "`"$msixPath`"", "/nv", "/o")
+    $packResult = & $makeAppx @packArgs 2>&1
+    if ($LASTEXITCODE -ne 0) { $packResult | Write-Host; throw "MakeAppx failed." }
+    Write-Host "  Package created." -ForegroundColor Green
+
+    $signResult = & $signTool sign /fd SHA256 /a /sha1 $Cert.Thumbprint "`"$msixPath`"" 2>&1
+    if ($LASTEXITCODE -ne 0) { $signResult | Write-Host; throw "SignTool failed." }
+    Write-Host "  Package signed." -ForegroundColor Green
+
+    Write-Host "Registering sparse AppX package..." -ForegroundColor Cyan
+    Add-AppxPackage -Path $msixPath -ExternalLocation $Paths.InstallDir
+    Write-Host "  Package registered." -ForegroundColor Green
+}
+
 # ─── Top-level dispatch ────────────────────────────────────────────────────
 function Invoke-Main {
     # Enforce elevation here (not via #Requires) so dot-sourcing for unit tests works
