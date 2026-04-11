@@ -591,6 +591,74 @@ function Uninstall-Tool {
     Write-Host "  $Slug uninstalled." -ForegroundColor Green
 }
 
+# ─── Interactive discovery and prompt ─────────────────────────────────────
+function Get-AvailableConfigs {
+    if (-not (Test-Path $script:ConfigsDir)) {
+        throw "No configs directory at $script:ConfigsDir"
+    }
+    $files = Get-ChildItem $script:ConfigsDir -Filter "*.json" -ErrorAction SilentlyContinue
+    if (-not $files) {
+        throw "No tool configs found in $script:ConfigsDir. See README for how to add one."
+    }
+    $result = @()
+    foreach ($f in $files) {
+        try {
+            $cfg = Get-Content $f.FullName -Raw | ConvertFrom-Json
+            $pkgName = if ($cfg.packageName) { $cfg.packageName } else { "AIToolContextMenu." + (ConvertTo-PascalCase -Slug $cfg.toolSlug) }
+            $installed = [bool](Get-AppxPackage -Name $pkgName -ErrorAction SilentlyContinue)
+            $result += [PSCustomObject]@{
+                Slug      = $cfg.toolSlug
+                Name      = $cfg.toolName
+                Installed = $installed
+            }
+        } catch {
+            Write-Host "  Skipping invalid config $($f.Name): $_" -ForegroundColor Yellow
+        }
+    }
+    return $result
+}
+
+function Show-InteractivePrompt {
+    param(
+        [Parameter(Mandatory)][array]$Configs,
+        [ValidateSet("install", "uninstall")][string]$Mode
+    )
+    if ($Configs.Count -eq 0) {
+        Write-Host "No tools available for $Mode." -ForegroundColor Yellow
+        return @()
+    }
+
+    $verb = if ($Mode -eq "install") { "install" } else { "uninstall" }
+    Write-Host ""
+    Write-Host "Available AI tool context menus:" -ForegroundColor Cyan
+    for ($i = 0; $i -lt $Configs.Count; $i++) {
+        $c = $Configs[$i]
+        $status = if ($c.Installed) { "(installed)" } else { "(not installed)" }
+        $num = $i + 1
+        "  [$num] $($c.Name.PadRight(20)) $status" | Write-Host
+    }
+    Write-Host ""
+
+    while ($true) {
+        $choice = Read-Host "Select tools to $verb (comma-separated numbers, 'all', or 'q' to cancel)"
+        $choice = $choice.Trim().ToLower()
+        if ($choice -eq 'q' -or $choice -eq '') { return @() }
+        if ($choice -eq 'all') { return $Configs }
+
+        $selected = @()
+        $valid = $true
+        foreach ($token in ($choice -split ',')) {
+            $token = $token.Trim()
+            if ($token -notmatch '^\d+$') { $valid = $false; break }
+            $idx = [int]$token - 1
+            if ($idx -lt 0 -or $idx -ge $Configs.Count) { $valid = $false; break }
+            $selected += $Configs[$idx]
+        }
+        if ($valid -and $selected.Count -gt 0) { return $selected }
+        Write-Host "Invalid selection. Try again." -ForegroundColor Yellow
+    }
+}
+
 # ─── Top-level dispatch ────────────────────────────────────────────────────
 function Invoke-Main {
     # Enforce elevation here (not via #Requires) so dot-sourcing for unit tests works
@@ -602,23 +670,58 @@ function Invoke-Main {
     if ($ToolName) {
         if ($Uninstall) {
             Uninstall-Tool -Slug $ToolName -ConfigPath $ConfigFile
-            Write-Host ""
-            Write-Host "Restarting Explorer..." -ForegroundColor Cyan
-            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 1
-            Start-Process explorer.exe
-            Write-Host "Done." -ForegroundColor Green
-            return
+        } else {
+            Install-Tool -Slug $ToolName -ConfigPath $ConfigFile -ExePathOverride $ExecutablePath
         }
-        Install-Tool -Slug $ToolName -ConfigPath $ConfigFile -ExePathOverride $ExecutablePath
         Write-Host ""
         Write-Host "Restarting Explorer..." -ForegroundColor Cyan
         Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 1
         Start-Process explorer.exe
-        Write-Host "Done. Right-click inside any folder to see the tool's submenu." -ForegroundColor Green
+        Write-Host "Done." -ForegroundColor Green
+        return
+    }
+
+    # Interactive mode
+    $all = Get-AvailableConfigs
+    $pool = if ($Uninstall) { $all | Where-Object { $_.Installed } } else { $all }
+    if (-not $pool -or $pool.Count -eq 0) {
+        $msg = if ($Uninstall) { "No tools are currently installed." } else { "No tool configs found." }
+        Write-Host $msg -ForegroundColor Yellow
+        return
+    }
+
+    $mode = if ($Uninstall) { "uninstall" } else { "install" }
+    $selected = Show-InteractivePrompt -Configs $pool -Mode $mode
+    if (-not $selected -or $selected.Count -eq 0) {
+        Write-Host "Cancelled." -ForegroundColor Yellow
+        return
+    }
+
+    $failures = @()
+    foreach ($sel in $selected) {
+        try {
+            if ($Uninstall) {
+                Uninstall-Tool -Slug $sel.Slug
+            } else {
+                Install-Tool -Slug $sel.Slug -ExePathOverride $ExecutablePath
+            }
+        } catch {
+            Write-Host "  Failed for $($sel.Slug): $_" -ForegroundColor Red
+            $failures += $sel.Slug
+        }
+    }
+
+    Write-Host ""
+    Write-Host "Restarting Explorer..." -ForegroundColor Cyan
+    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+    Start-Process explorer.exe
+
+    if ($failures.Count -gt 0) {
+        Write-Host "Completed with failures: $($failures -join ', ')" -ForegroundColor Yellow
     } else {
-        Write-Host "Interactive mode — not yet implemented" -ForegroundColor Yellow
+        Write-Host "Done." -ForegroundColor Green
     }
 }
 
