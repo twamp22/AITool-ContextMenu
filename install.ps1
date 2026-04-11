@@ -242,6 +242,152 @@ function Build-ToolDll {
     return $dllPath
 }
 
+# ─── Artifact install ─────────────────────────────────────────────────────
+function Install-ToolArtifacts {
+    param($Paths, [string]$DllSrcPath)
+
+    # Stop explorer if DLL is locked at the destination
+    if (Test-Path $Paths.InstallDir) {
+        $dllDest = Join-Path $Paths.InstallDir "AIToolContextMenu.dll"
+        if (Test-Path $dllDest) {
+            try { [IO.File]::OpenWrite($dllDest).Close() }
+            catch {
+                Write-Host "  DLL locked. Restarting Explorer..." -ForegroundColor Yellow
+                Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 2
+            }
+        }
+    }
+
+    if (-not (Test-Path $Paths.InstallDir)) {
+        New-Item -ItemType Directory -Path $Paths.InstallDir -Force | Out-Null
+    }
+    Copy-Item $DllSrcPath $Paths.InstallDir -Force
+    Write-Host "  Copied DLL to $($Paths.InstallDir)" -ForegroundColor Green
+
+    # Placeholder logo
+    $logo = Join-Path $Paths.InstallDir "logo.png"
+    if (-not (Test-Path $logo)) {
+        Add-Type -AssemblyName System.Drawing
+        $bmp = New-Object System.Drawing.Bitmap(44, 44)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.Clear([System.Drawing.Color]::Transparent)
+        $g.Dispose()
+        $bmp.Save($logo, [System.Drawing.Imaging.ImageFormat]::Png)
+        $bmp.Dispose()
+    }
+
+    # Stub exe (AppX manifest requires an .exe)
+    $stub = Join-Path $Paths.InstallDir "Stub.exe"
+    if (-not (Test-Path $stub)) {
+        $fwDir = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+        $csc = Join-Path $fwDir "csc.exe"
+        $stubSrc = Join-Path $env:TEMP "stub.cs"
+        Set-Content -Path $stubSrc -Value "class S{static void Main(){}}"
+        & $csc /nologo /target:exe /out:$stub $stubSrc 2>&1 | Out-Null
+        Remove-Item $stubSrc -Force
+    }
+}
+
+# ─── COM registration ─────────────────────────────────────────────────────
+function Register-ToolComClass {
+    param($Paths)
+    Write-Host "Registering COM class..." -ForegroundColor Cyan
+    New-Item -Path "$($Paths.ClsidKey)\InprocServer32" -Force | Out-Null
+    Set-ItemProperty -Path $Paths.ClsidKey -Name "(Default)" -Value "$($Paths.Pascal)Command"
+    Set-ItemProperty -Path "$($Paths.ClsidKey)\InprocServer32" -Name "(Default)" -Value (Join-Path $Paths.InstallDir "AIToolContextMenu.dll")
+    Set-ItemProperty -Path "$($Paths.ClsidKey)\InprocServer32" -Name "ThreadingModel" -Value "Both"
+    Write-Host "  Registered CLSID {$($Paths.Guid)}" -ForegroundColor Green
+}
+
+# ─── AppxManifest.xml generation ──────────────────────────────────────────
+function Write-AppxManifest {
+    param($Config, $Paths)
+    $manifestPath = Join-Path $Paths.InstallDir "AppxManifest.xml"
+    $displayName = [Security.SecurityElement]::Escape($Config.toolName)
+    $description = [Security.SecurityElement]::Escape("$($Config.toolName) Context Menu")
+
+    $content = @"
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap10 com desktop4 desktop5 desktop6 rescap">
+
+  <Identity Name="$($Paths.PackageName)"
+            Publisher="$($Paths.Publisher)"
+            Version="1.0.0.0"
+            ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>$displayName Context Menu</DisplayName>
+    <PublisherDisplayName>$displayName</PublisherDisplayName>
+    <Logo>logo.png</Logo>
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+    <desktop6:RegistryWriteVirtualization>disabled</desktop6:RegistryWriteVirtualization>
+    <desktop6:FileSystemWriteVirtualization>disabled</desktop6:FileSystemWriteVirtualization>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop"
+                        MinVersion="10.0.19041.0"
+                        MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="App"
+                 Executable="Stub.exe"
+                 uap10:TrustLevel="mediumIL"
+                 uap10:RuntimeBehavior="win32App">
+      <uap:VisualElements
+        DisplayName="$displayName"
+        Description="$description"
+        BackgroundColor="transparent"
+        Square150x150Logo="logo.png"
+        Square44x44Logo="logo.png"
+        AppListEntry="none" />
+      <Extensions>
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type="Directory\Background">
+              <desktop5:Verb Id="$($Paths.ShellVerbId)" Clsid="$($Paths.Guid)" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="$displayName Context Menu Handler">
+              <com:Class Id="$($Paths.Guid)"
+                         Path="AIToolContextMenu.dll"
+                         ThreadingModel="Both" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+  </Capabilities>
+</Package>
+"@
+
+    [IO.File]::WriteAllText($manifestPath, $content, [Text.Encoding]::UTF8)
+    Write-Host "  Generated AppxManifest.xml" -ForegroundColor Green
+}
+
 # ─── Top-level dispatch ────────────────────────────────────────────────────
 function Invoke-Main {
     # Enforce elevation here (not via #Requires) so dot-sourcing for unit tests works
