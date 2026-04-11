@@ -525,6 +525,72 @@ function Install-Tool {
     Write-Host "  $Slug installed." -ForegroundColor Green
 }
 
+# ─── Uninstall pipeline for one tool ─────────────────────────────────────
+function Uninstall-Tool {
+    param([string]$Slug, [string]$ConfigPath)
+
+    Write-Host ""
+    Write-Host "═══ Uninstalling $Slug ═══" -ForegroundColor Cyan
+
+    $cfg = Read-ToolConfig -ToolSlug $Slug -ExplicitPath $ConfigPath
+    # Uninstall doesn't need a real exe path — pass a placeholder so Resolve-ToolPaths works
+    $paths = Resolve-ToolPaths -Config $cfg -ResolvedExePath "placeholder"
+
+    $pkg = Get-AppxPackage -Name $paths.PackageName -ErrorAction SilentlyContinue
+    if ($pkg) {
+        Remove-AppxPackage $pkg
+        Write-Host "  Removed AppX package $($paths.PackageName)" -ForegroundColor Green
+    }
+
+    if (Test-Path $paths.ShellKey) {
+        Remove-Item $paths.ShellKey -Recurse -Force
+        Write-Host "  Removed shell key" -ForegroundColor Green
+    }
+
+    if (Test-Path $paths.ClsidKey) {
+        Remove-Item $paths.ClsidKey -Recurse -Force
+        Write-Host "  Removed CLSID registration" -ForegroundColor Green
+    }
+
+    if (Test-Path $paths.InstallDir) {
+        try {
+            Remove-Item $paths.InstallDir -Recurse -Force
+            Write-Host "  Removed install dir" -ForegroundColor Green
+        } catch {
+            Write-Host "  Install dir locked — restarting Explorer and retrying" -ForegroundColor Yellow
+            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            Remove-Item $paths.InstallDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Only remove the signing cert if no other installed tool still uses this publisher
+    $stillInUse = $false
+    $siblingFiles = Get-ChildItem $script:ConfigsDir -Filter "*.json" -ErrorAction SilentlyContinue
+    foreach ($sibling in $siblingFiles) {
+        if ($sibling.BaseName -eq $Slug) { continue }
+        try {
+            $other = Get-Content $sibling.FullName -Raw | ConvertFrom-Json
+            $otherPub = if ($other.publisher) { $other.publisher } else { "CN=AIToolContextMenuDev" }
+            if ($otherPub -eq $paths.Publisher) {
+                $otherPkgName = if ($other.packageName) { $other.packageName } else { "AIToolContextMenu." + (ConvertTo-PascalCase -Slug $other.toolSlug) }
+                if (Get-AppxPackage -Name $otherPkgName -ErrorAction SilentlyContinue) {
+                    $stillInUse = $true
+                    break
+                }
+            }
+        } catch { }
+    }
+    if (-not $stillInUse) {
+        foreach ($store in @("Cert:\CurrentUser\My", "Cert:\LocalMachine\TrustedPeople")) {
+            Get-ChildItem $store -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq $paths.CertFriendly } |
+                ForEach-Object { Remove-Item $_.PSPath -Force; Write-Host "  Removed cert from $store" -ForegroundColor Green }
+        }
+    }
+
+    Write-Host "  $Slug uninstalled." -ForegroundColor Green
+}
+
 # ─── Top-level dispatch ────────────────────────────────────────────────────
 function Invoke-Main {
     # Enforce elevation here (not via #Requires) so dot-sourcing for unit tests works
@@ -535,7 +601,13 @@ function Invoke-Main {
 
     if ($ToolName) {
         if ($Uninstall) {
-            Write-Host "Uninstall pipeline — not yet implemented" -ForegroundColor Yellow
+            Uninstall-Tool -Slug $ToolName -ConfigPath $ConfigFile
+            Write-Host ""
+            Write-Host "Restarting Explorer..." -ForegroundColor Cyan
+            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 1
+            Start-Process explorer.exe
+            Write-Host "Done." -ForegroundColor Green
             return
         }
         Install-Tool -Slug $ToolName -ConfigPath $ConfigFile -ExePathOverride $ExecutablePath
