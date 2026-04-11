@@ -13,8 +13,8 @@ param(
     [string]$ClaudePath
 )
 
-$forwardArgs = @("-ToolName", "claude-code")
-if ($Uninstall)  { $forwardArgs += "-Uninstall" }
-if ($ClaudePath) { $forwardArgs += @("-ExecutablePath", $ClaudePath) }
+$forwardArgs = @{ ToolName = "claude-code" }
+if ($Uninstall)  { $forwardArgs.Uninstall      = $true }
+if ($ClaudePath) { $forwardArgs.ExecutablePath = $ClaudePath }
 
 & (Join-Path $PSScriptRoot "install.ps1") @forwardArgs
