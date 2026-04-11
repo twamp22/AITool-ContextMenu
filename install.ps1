@@ -465,6 +465,66 @@ function Pack-AndRegisterMsix {
     Write-Host "  Package registered." -ForegroundColor Green
 }
 
+# ─── Legacy backward-compat sweep (Claude Code only) ─────────────────────
+function Invoke-LegacyClaudeSweep {
+    $legacyDir     = Join-Path $env:ProgramFiles "ClaudeCodeContextMenu"
+    $legacyShell   = "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\ClaudeCodeCLI"
+    $legacyPkgName = "ClaudeCode.ContextMenu"
+    $swept = $false
+
+    $existingPkg = Get-AppxPackage -Name $legacyPkgName -ErrorAction SilentlyContinue
+    if ($existingPkg -and $existingPkg.InstallLocation -like "$legacyDir*") {
+        Remove-AppxPackage $existingPkg
+        Write-Host "  Removed legacy AppX package at $legacyDir" -ForegroundColor Yellow
+        $swept = $true
+    }
+    if (Test-Path $legacyShell) {
+        Remove-Item $legacyShell -Recurse -Force
+        Write-Host "  Removed legacy shell key" -ForegroundColor Yellow
+        $swept = $true
+    }
+    if (Test-Path $legacyDir) {
+        try {
+            Remove-Item $legacyDir -Recurse -Force
+            Write-Host "  Removed legacy install dir $legacyDir" -ForegroundColor Yellow
+            $swept = $true
+        } catch {
+            Write-Host "  Could not remove $legacyDir (may be explorer-locked). Continuing." -ForegroundColor Yellow
+        }
+    }
+    if ($swept) {
+        Write-Host "  Legacy Claude Code install cleaned up." -ForegroundColor Green
+    }
+}
+
+# ─── Full install pipeline for one tool ──────────────────────────────────
+function Install-Tool {
+    param([string]$Slug, [string]$ConfigPath, [string]$ExePathOverride)
+
+    Write-Host ""
+    Write-Host "═══ Installing $Slug ═══" -ForegroundColor Cyan
+
+    $cfg   = Read-ToolConfig -ToolSlug $Slug -ExplicitPath $ConfigPath
+    $exe   = Resolve-ToolExecutable -Config $cfg -Override $ExePathOverride
+    $paths = Resolve-ToolPaths -Config $cfg -ResolvedExePath $exe
+    Write-Host "Tool:       $($paths.Name)" -ForegroundColor Cyan
+    Write-Host "Executable: $($paths.ExePath)" -ForegroundColor Cyan
+    Write-Host "CLSID:      {$($paths.Guid)}" -ForegroundColor Cyan
+    Write-Host "Install:    $($paths.InstallDir)" -ForegroundColor Cyan
+
+    if ($Slug -eq "claude-code") { Invoke-LegacyClaudeSweep }
+
+    Write-ToolConfigHeader -Config $cfg -Paths $paths
+    $dllSrc = Build-ToolDll
+    Install-ToolArtifacts -Paths $paths -DllSrcPath $dllSrc
+    Register-ToolComClass -Paths $paths
+    Write-AppxManifest -Config $cfg -Paths $paths
+    $cert = Ensure-SigningCert -Paths $paths
+    Pack-AndRegisterMsix -Paths $paths -Cert $cert
+
+    Write-Host "  $Slug installed." -ForegroundColor Green
+}
+
 # ─── Top-level dispatch ────────────────────────────────────────────────────
 function Invoke-Main {
     # Enforce elevation here (not via #Requires) so dot-sourcing for unit tests works
@@ -475,12 +535,18 @@ function Invoke-Main {
 
     if ($ToolName) {
         if ($Uninstall) {
-            Write-Host "Uninstall pipeline for $ToolName - not yet implemented" -ForegroundColor Yellow
-        } else {
-            Write-Host "Install pipeline for $ToolName - not yet implemented" -ForegroundColor Yellow
+            Write-Host "Uninstall pipeline — not yet implemented" -ForegroundColor Yellow
+            return
         }
+        Install-Tool -Slug $ToolName -ConfigPath $ConfigFile -ExePathOverride $ExecutablePath
+        Write-Host ""
+        Write-Host "Restarting Explorer..." -ForegroundColor Cyan
+        Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+        Start-Process explorer.exe
+        Write-Host "Done. Right-click inside any folder to see the tool's submenu." -ForegroundColor Green
     } else {
-        Write-Host "Interactive mode - not yet implemented" -ForegroundColor Yellow
+        Write-Host "Interactive mode — not yet implemented" -ForegroundColor Yellow
     }
 }
 
