@@ -512,8 +512,6 @@ function Install-Tool {
     Write-Host "CLSID:      {$($paths.Guid)}" -ForegroundColor Cyan
     Write-Host "Install:    $($paths.InstallDir)" -ForegroundColor Cyan
 
-    if ($Slug -eq "claude-code") { Invoke-LegacyClaudeSweep }
-
     Write-ToolConfigHeader -Config $cfg -Paths $paths
     $dllSrc = Build-ToolDll
     Install-ToolArtifacts -Paths $paths -DllSrcPath $dllSrc
@@ -521,6 +519,8 @@ function Install-Tool {
     Write-AppxManifest -Config $cfg -Paths $paths
     $cert = Ensure-SigningCert -Paths $paths
     Pack-AndRegisterMsix -Paths $paths -Cert $cert
+
+    if ($Slug -eq "claude-code") { Invoke-LegacyClaudeSweep }
 
     Write-Host "  $Slug installed." -ForegroundColor Green
 }
