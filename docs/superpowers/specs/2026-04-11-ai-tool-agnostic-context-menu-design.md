@@ -1,7 +1,7 @@
 # AI Tool-Agnostic Context Menu — Design
 
 **Date:** 2026-04-11
-**Status:** Approved for implementation planning
+**Status:** Implemented and verified on 2026-04-11. Shipped on branch `refactor/ai-tool-agnostic`. Two in-flight fixes were folded in during manual verification (DLL lock on re-install, shim splatting); both are reflected in §6.5 and §11.
 **Scope:** Refactor the Windows 11 Explorer context menu integration from Claude-Code-specific to a configuration-driven framework that supports any AI coding CLI (Claude Code, Codex, future tools) with side-by-side installation.
 
 ---
@@ -265,7 +265,7 @@ Steps, adapted from the existing `add-claude-context-menu.ps1`:
 9. **Generate `AppxManifest.xml`** with `$packageName`, `$publisher`, `$shellVerbId`, the GUID, and display name = `toolName`.
 10. **Ensure signing cert** exists (`$certFriendly`, subject = `$publisher`). Create and trust if missing. One cert per unique publisher — two tools with the same publisher reuse the cert.
 11. **Pack + sign MSIX**, remove any previous package with the same name, `Add-AppxPackage -ExternalLocation $installDir`.
-12. **Backward-compat sweep** (runs only when `toolSlug == "claude-code"`): if `$env:ProgramFiles\ClaudeCodeContextMenu\` exists OR the old AppX package is registered at that path, remove the old package, old shell key, and old install directory. Because `claude-code.json` pins the legacy GUID, the CLSID registration continues to work without any hand-off step — explorer sees the same CLSID, just a different file location.
+12. **Backward-compat sweep** (runs only when `toolSlug == "claude-code"`, AFTER step 11 completes). If `$env:ProgramFiles\ClaudeCodeContextMenu\` exists, remove it. If the old shell key `HKCR\Directory\Background\shell\ClaudeCodeCLI` exists, remove it. If any lingering `ClaudeCode.ContextMenu` AppX package with an `InstallLocation` under the legacy dir exists, remove it. The sweep runs *after* the new MSIX is fully registered so explorer's CLSID lookup is already pointed at the new DLL via both `Register-ToolComClass` and the new AppX manifest — removing legacy artifacts at that point cannot orphan the CLSID. In practice, on a typical upgrade, `Pack-AndRegisterMsix` (step 11) has already replaced the legacy AppX package by name, and the legacy `$ProgramFiles\ClaudeCodeContextMenu\` dir may not even exist, so the sweep is a silent no-op.
 13. **Restart explorer.exe** once after all selected tools are processed, not once per tool.
 
 ### 6.4 Uninstall pipeline (per tool)
@@ -280,35 +280,50 @@ Uninstall does **not** run the legacy backward-compat sweep — it only targets 
 
 ### 6.5 Backward-compat shim (`add-claude-context-menu.ps1`)
 
-Reduced to a forwarder that preserves the old parameter surface:
+Reduced to a forwarder that preserves the old parameter surface. Uses **hashtable splatting** — not array splatting — so each arg binds by parameter name rather than position:
 
 ```powershell
 #Requires -RunAsAdministrator
 param([switch]$Uninstall, [string]$ClaudePath)
-$args = @("-ToolName", "claude-code")
-if ($Uninstall)  { $args += "-Uninstall" }
-if ($ClaudePath) { $args += @("-ExecutablePath", $ClaudePath) }
-& (Join-Path $PSScriptRoot "install.ps1") @args
+
+$forwardArgs = @{ ToolName = "claude-code" }
+if ($Uninstall)  { $forwardArgs.Uninstall      = $true }
+if ($ClaudePath) { $forwardArgs.ExecutablePath = $ClaudePath }
+
+& (Join-Path $PSScriptRoot "install.ps1") @forwardArgs
 ```
 
 Users with existing scripts or muscle memory see no change.
+
+> **Gotcha we hit during Task 14 verification:** An earlier draft used array splatting (`$args = @("-ToolName", "claude-code"); & install.ps1 @args`). Array splat binds *positionally*, so `-ToolName` became the literal value of the first positional parameter and `claude-code` fell through to the second. Hashtable splat is the only form that binds by name.
 
 ### 6.6 UUIDv5 in PowerShell (reference implementation)
 
 ```powershell
 function Get-UuidV5 {
-    param([string]$NamespaceUuid, [string]$Name)
+    param(
+        [Parameter(Mandatory)][string]$NamespaceUuid,
+        [Parameter(Mandatory)][string]$Name
+    )
     $ns = [Guid]::Parse($NamespaceUuid).ToByteArray()
     # .NET stores the first 3 fields in little-endian; convert to network order
     [Array]::Reverse($ns, 0, 4); [Array]::Reverse($ns, 4, 2); [Array]::Reverse($ns, 6, 2)
+
     $nameBytes = [Text.Encoding]::UTF8.GetBytes($Name)
     $sha1 = [Security.Cryptography.SHA1]::Create()
-    $hash = $sha1.ComputeHash($ns + $nameBytes)
-    $bytes = $hash[0..15]
-    $bytes[6] = ($bytes[6] -band 0x0F) -bor 0x50   # version 5
-    $bytes[8] = ($bytes[8] -band 0x3F) -bor 0x80   # RFC 4122 variant
+    try {
+        $hash = $sha1.ComputeHash($ns + $nameBytes)
+    } finally {
+        $sha1.Dispose()
+    }
+    # Explicit [byte[]] cast is REQUIRED — PowerShell's array slicing returns
+    # Object[], which [Guid]::new() rejects.
+    $bytes = [byte[]]$hash[0..15]
+    $bytes[6] = ([byte]($bytes[6] -band 0x0F)) -bor 0x50   # version 5
+    $bytes[8] = ([byte]($bytes[8] -band 0x3F)) -bor 0x80   # RFC 4122 variant
+
     [Array]::Reverse($bytes, 0, 4); [Array]::Reverse($bytes, 4, 2); [Array]::Reverse($bytes, 6, 2)
-    return [Guid]::new($bytes).ToString().ToUpper()
+    return ([Guid]::new($bytes)).ToString().ToUpper()
 }
 ```
 
@@ -322,7 +337,7 @@ ClaudeCodeContextMenu/                      (repo root — name unchanged to avo
 │   ├── AIToolContextMenu.c                 (renamed, generic)
 │   ├── AIToolContextMenu.def                (renamed, updated LIBRARY line)
 │   ├── build.bat                            (moved, simplified)
-│   └── tool_config.h                        (generated — gitignored)
+│   └── tool_config.h                        (tracked — committed dev stub; install.ps1 overwrites per-build)
 ├── configs/
 │   ├── claude-code.json                     (pins legacy GUID + packageName)
 │   └── codex.json                           (derived GUID + defaulted packageName)
@@ -331,7 +346,7 @@ ClaudeCodeContextMenu/                      (repo root — name unchanged to avo
 ├── docs/
 │   └── superpowers/specs/
 │       └── 2026-04-11-ai-tool-agnostic-context-menu-design.md
-├── .gitignore                               (add src/tool_config.h, src/*.dll, src/*.obj, src/*.exp, src/*.lib)
+├── .gitignore                               (add src/*.dll, src/*.obj, src/*.exp, src/*.lib, src/*.stale, *.msix)
 ├── README.md                                (updated — see §9)
 └── LICENSE
 ```
@@ -374,26 +389,30 @@ Uninstalling one does not touch any resource belonging to the other.
 
 ## 10. Testing plan
 
-Manual verification at merge time (no automated test framework in the project today — not introducing one as part of this refactor):
+Manual verification at merge time (no automated test framework in the project today — not introducing one as part of this refactor). **Status: all scenarios below were executed on the target machine on 2026-04-11 as part of the refactor completion. Two bugs were found and fixed in-flight: DLL lock on re-install (see §11) and the backward-compat shim's array splatting (see §6.5).**
 
-1. **Clean slate install, interactive.** From a machine with neither tool installed, run `.\install.ps1`, select both tools, verify two submenus appear on right-click.
-2. **Side-by-side operation.** Invoke each submenu's items; confirm the correct executable launches with the correct CWD and args.
-3. **Isolated uninstall.** `.\install.ps1 -Uninstall -ToolName codex`; verify Codex menu is gone, Claude Code menu still works.
-4. **Backward compat upgrade.** On a machine with the legacy `add-claude-context-menu.ps1` already installed, run new `.\install.ps1 -ToolName claude-code`; verify legacy install dir is cleaned up, the submenu still appears, the CLSID is still `E3C26D71-...`.
-5. **Legacy shim.** Run `.\add-claude-context-menu.ps1`; verify it forwards correctly and produces the same result as `-ToolName claude-code`.
-6. **GUID collision check.** UUIDv5 of `"claude-code"` should be inspected and confirmed NOT to equal the pinned legacy GUID (it won't — that's why we pin). Log both during install for debugging.
-7. **Full uninstall of both tools.** Run `.\install.ps1 -Uninstall` interactively, select both. Verify: no `AIToolContextMenu\` directory, no CLSID keys, no shell keys, no AppX packages, no orphaned certs.
-8. **Add a third tool.** Create `configs/dummy.json` with just `toolSlug`, `toolName`, `executable=cmd.exe`, `parentMenu`, one menu item; run interactive install; verify it works end-to-end with derived GUID and defaulted package name.
+1. **Legacy upgrade path.** Machine with the pre-refactor `ClaudeCode.ContextMenu` AppX already installed. Run new `.\install.ps1 -ToolName claude-code`; verify the legacy package is replaced cleanly (via `Pack-AndRegisterMsix`'s same-name removal), the legacy sweep reports nothing to clean (no old ProgramFiles dir, no old shell key), the new MSIX is registered, and the submenu still appears with the legacy CLSID `E3C26D71-...`. ✅
+2. **Side-by-side operation.** Install Codex alongside Claude Code (using `powershell.exe` as a stand-in executable). Right-click in a folder — both "Claude Code" and "Codex" submenus appear, each launches the correct executable in the right-clicked folder's CWD. ✅
+3. **Registry isolation.** `reg query` both CLSIDs. Both exist, each pointing to a different `AIToolContextMenu.dll` under its own subdir. ✅
+4. **Isolated uninstall.** `.\install.ps1 -Uninstall -ToolName codex`; verify Codex submenu is gone, Codex dir and CLSID are gone, Claude Code menu and CLSID still present and working. ✅
+5. **Legacy shim.** `.\add-claude-context-menu.ps1` without args forwards correctly to `install.ps1 -ToolName claude-code` and produces a working install. ✅ (fixed during testing: array splatting → hashtable splatting)
+6. **Interactive mode, install.** `.\install.ps1` lists both configs with correct installed-status, accepts `q` to cancel. ✅
+7. **Interactive mode, uninstall.** `.\install.ps1 -Uninstall` lists only currently-installed tools, accepts numeric selection. ✅
+8. **Full uninstall cleanup.** After uninstalling everything, no `ClaudeCode.ContextMenu` AppX, no `AIToolContextMenu.Codex` AppX, no `HKCR\CLSID\{...}` keys, no new-installer-created certs. (The empty `$ProgramFiles\AIToolContextMenu\` parent dir remains — cosmetic, accepted.) ✅
+9. **Re-install from clean state.** `.\install.ps1 -ToolName claude-code` succeeds on a machine with nothing installed, creates a fresh cert, registers cleanly. ✅
 
 ---
 
 ## 11. Open risks and mitigations
 
-- **Explorer DLL lock during rebuild.** Existing script handles this by stopping explorer when the DLL is locked. Preserved as-is.
-- **UUIDv5 byte-order bugs.** PowerShell's `[Guid]::ToByteArray()` uses mixed endianness for the first three fields; the reference implementation in §6.6 handles this. Confirmed by spot-checking against an independent UUIDv5 implementation during development.
+- **Explorer DLL lock during re-install.** On a re-install, the destination `AIToolContextMenu.dll` is often still loaded in the running explorer process. Stopping explorer and sleeping a couple seconds is NOT reliable because Windows 11 auto-restarts explorer within ~1 second and re-loads the COM DLL before `Copy-Item` can replace it. **Mitigation implemented in `Install-ToolArtifacts`:** rename-then-replace. Renaming a locked file to a `.<guid>.stale` suffix succeeds on NTFS even while a handle is held (MoveFile updates the directory entry while the open handle keeps pointing at the underlying file blob). The new DLL is then copied under the original name. If the rename itself fails, we fall back to stopping explorer, sleeping 3 seconds, and retrying the rename.
+- **UUIDv5 byte-order + array-type bugs.** PowerShell's `[Guid]::ToByteArray()` uses mixed endianness for the first three fields. And `$hash[0..15]` array slicing returns `Object[]`, which `[Guid]::new()` rejects — an explicit `[byte[]]` cast is required. Both issues are addressed in the reference implementation in §6.6, and the implementation is verified against the RFC 4122 DNS namespace test vector (`www.example.com` → `2ED6657D-E927-568B-95E1-2665A8AEA6A2`).
 - **MSIX signing with a shared publisher.** If two tool configs share a publisher, they share a cert. Uninstall must not remove the shared cert while another tool still depends on it — the uninstall pipeline (§6.4) handles this by only removing certs with no remaining referencing tool.
-- **Legacy upgrade race.** If a user runs the new installer while explorer holds the old DLL, the backward-compat sweep cannot delete the old install dir. Mitigation: stop explorer before the sweep, same pattern as existing install.
+- **Legacy upgrade ordering.** `Invoke-LegacyClaudeSweep` must run *after* `Pack-AndRegisterMsix` completes, not before. Running it first would create a window where the legacy CLSID `{E3C26D71-...}` points at a deleted DLL path until the new install finishes. Running it after lets the new MSIX fully register (and, via the new manifest plus `Register-ToolComClass`, claim the same CLSID with the new DLL path) before any legacy artifacts are removed. By that point the legacy AppX package is already gone (replaced by name inside `Pack-AndRegisterMsix`), so the sweep typically finds nothing to do — its role is limited to cleaning up any stale `$ProgramFiles\ClaudeCodeContextMenu\` directory or old shell key that survived a previous install.
+- **Backward-compat shim splatting.** The shim must use hashtable splatting (`@{ ToolName = "claude-code" }`), not array splatting (`@("-ToolName", "claude-code")`). Array splat binds positionally and will misroute the args. See §6.5.
+- **Shell splat parameter semantics.** `[switch]` parameters in hashtable splats are enabled by setting the key to `$true`, not by including just the key. `$forwardArgs.Uninstall = $true` is correct; `$forwardArgs.Add("Uninstall", "")` is not.
 - **Config typos.** Invalid JSON or missing required fields should fail with a clear, actionable error message, not a cryptic PowerShell stack trace. `install.ps1` validates required fields explicitly before starting the build.
+- **Empty parent install directory after full uninstall.** After uninstalling every tool, the empty `$env:ProgramFiles\AIToolContextMenu\` parent directory remains on disk. This is cosmetic (no files inside, just an empty folder). Accepted as-is for v1 — not worth the complexity of reference counting when the directory's existence has no functional effect.
 
 ---
 

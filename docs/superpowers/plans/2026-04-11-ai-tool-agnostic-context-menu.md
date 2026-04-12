@@ -2,6 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Status (2026-04-11):** All 14 tasks completed and verified end-to-end on the target machine. Two in-flight fixes were folded in during Task 14 verification:
+> 1. `Install-ToolArtifacts` switched from stop-explorer-and-sleep to rename-then-replace for handling a locked destination DLL (Windows 11 auto-restarts explorer too fast for the old approach).
+> 2. The `add-claude-context-menu.ps1` shim switched from array splatting to hashtable splatting (array splatting binds positionally and misrouted the forwarded args).
+>
+> Both fixes are reflected in the task code blocks below. If you're re-executing this plan, use the updated code.
+
 **Goal:** Refactor the Claude-Code-specific Windows 11 Explorer context menu into a config-driven framework that supports any AI CLI tool side-by-side, with interactive install/uninstall and backward compatibility for existing Claude Code installations.
 
 **Architecture:** Per-tool compilation of one generic C source file. PowerShell installer reads `configs/<slug>.json`, generates a C header (`src/tool_config.h`) containing all tool-specific strings + GUID + menu items, runs `build.bat`, then packages and registers a signed sparse MSIX. Each tool gets its own CLSID, install dir, AppX package, and shell verb ID — no shared state between tools.
@@ -22,7 +28,7 @@ ClaudeCodeContextMenu/
 │   ├── AIToolContextMenu.c        (NEW — replaces ClaudeCodeContextMenu.c)
 │   ├── AIToolContextMenu.def      (NEW — replaces ClaudeCodeContextMenu.def)
 │   ├── build.bat                  (MOVED from root, updated)
-│   └── tool_config.h              (GENERATED — gitignored, dev stub committed initially for standalone builds)
+│   └── tool_config.h              (TRACKED dev stub; install.ps1 overwrites per-build)
 ├── configs/
 │   ├── claude-code.json           (NEW)
 │   └── codex.json                 (NEW)
@@ -87,6 +93,7 @@ src/*.dll
 src/*.obj
 src/*.exp
 src/*.lib
+src/*.stale
 
 # Legacy auto-generated header (pre-refactor — should not exist in new layout)
 claude_path.h
@@ -95,6 +102,8 @@ src/claude_path.h
 # MSIX build artifacts
 *.msix
 ```
+
+The `src/*.stale` pattern covers the renamed-out-of-the-way copies that `Install-ToolArtifacts` creates when displacing a locked destination DLL (see Task 7).
 
 Note: `src/tool_config.h` is intentionally tracked. We commit a Claude-Code dev
 stub so developers can build the DLL standalone from `src/` without running the
@@ -699,7 +708,6 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 Full initial contents:
 
 ```powershell
-#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Installs Windows 11 context-menu integration for one or more AI coding CLI tools.
@@ -709,6 +717,10 @@ Full initial contents:
     its own CLSID, AppX package, install dir, and shell verb — side-by-side safe.
 
     Without -ToolName, prompts interactively for which tools to install/uninstall.
+
+    Elevation is enforced at runtime inside Invoke-Main (NOT via
+    `#Requires -RunAsAdministrator`) so that dot-sourcing this file to
+    unit-test helper functions works from a non-elevated shell.
 .PARAMETER ToolName
     Optional. Tool slug (matches configs/<slug>.json). If omitted, runs interactively.
 .PARAMETER ConfigFile
@@ -754,7 +766,9 @@ function Get-UuidV5 {
     } finally {
         $sha1.Dispose()
     }
-    $bytes = $hash[0..15]
+    # Explicit [byte[]] cast is REQUIRED — PowerShell's array slicing returns
+    # Object[], which [Guid]::new() rejects.
+    $bytes = [byte[]]$hash[0..15]
     $bytes[6] = ([byte]($bytes[6] -band 0x0F)) -bor 0x50  # version 5
     $bytes[8] = ([byte]($bytes[8] -band 0x3F)) -bor 0x80  # RFC 4122 variant
 
@@ -767,6 +781,12 @@ function Get-UuidV5 {
 
 # ─── Top-level dispatch ────────────────────────────────────────────────────
 function Invoke-Main {
+    # Enforce elevation here (not via #Requires) so dot-sourcing for unit tests works
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        throw "install.ps1 must be run from an elevated PowerShell session (Run as Administrator)."
+    }
+
     if ($ToolName) {
         if ($Uninstall) {
             Write-Host "Uninstall pipeline for $ToolName — not yet implemented" -ForegroundColor Yellow
@@ -1153,22 +1173,39 @@ Insert after `Build-ToolDll`:
 function Install-ToolArtifacts {
     param($Paths, [string]$DllSrcPath)
 
-    # Stop explorer if DLL is locked at the destination
-    if (Test-Path $Paths.InstallDir) {
-        $dllDest = Join-Path $Paths.InstallDir "AIToolContextMenu.dll"
-        if (Test-Path $dllDest) {
-            try { [IO.File]::OpenWrite($dllDest).Close() }
-            catch {
-                Write-Host "  DLL locked. Restarting Explorer..." -ForegroundColor Yellow
-                Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-                Start-Sleep -Seconds 2
+    if (-not (Test-Path $Paths.InstallDir)) {
+        New-Item -ItemType Directory -Path $Paths.InstallDir -Force | Out-Null
+    }
+
+    # If the destination DLL is already there and possibly loaded by explorer,
+    # rename it out of the way so we can write a fresh copy. Renaming a locked
+    # DLL works on NTFS because MoveFile updates the directory entry while the
+    # existing open handle keeps pointing at the underlying file blob.
+    #
+    # The naive approach (stop explorer + sleep + Copy-Item) does NOT work on
+    # Windows 11: explorer auto-restarts within ~1 second and re-locks the DLL
+    # before Copy-Item can complete. Rename-then-replace sidesteps the race.
+    $dllDest = Join-Path $Paths.InstallDir "AIToolContextMenu.dll"
+    if (Test-Path $dllDest) {
+        $stale = "$dllDest.$([Guid]::NewGuid().ToString('N')).stale"
+        try {
+            Move-Item -Path $dllDest -Destination $stale -Force -ErrorAction Stop
+        } catch {
+            Write-Host "  DLL locked and rename failed. Restarting Explorer..." -ForegroundColor Yellow
+            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            try { Move-Item -Path $dllDest -Destination $stale -Force -ErrorAction Stop } catch {
+                throw "Could not displace locked DLL at $dllDest — close File Explorer windows and retry."
             }
         }
     }
 
-    if (-not (Test-Path $Paths.InstallDir)) {
-        New-Item -ItemType Directory -Path $Paths.InstallDir -Force | Out-Null
-    }
+    # Clean up any prior .stale files best-effort (explorer may have released them by now)
+    Get-ChildItem -Path $Paths.InstallDir -Filter "AIToolContextMenu.dll.*.stale" -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            try { Remove-Item -Path $_.FullName -Force -ErrorAction Stop } catch {}
+        }
+
     Copy-Item $DllSrcPath $Paths.InstallDir -Force
     Write-Host "  Copied DLL to $($Paths.InstallDir)" -ForegroundColor Green
 
@@ -1510,8 +1547,6 @@ function Install-Tool {
     Write-Host "CLSID:      {$($paths.Guid)}" -ForegroundColor Cyan
     Write-Host "Install:    $($paths.InstallDir)" -ForegroundColor Cyan
 
-    if ($Slug -eq "claude-code") { Invoke-LegacyClaudeSweep }
-
     Write-ToolConfigHeader -Config $cfg -Paths $paths
     $dllSrc = Build-ToolDll
     Install-ToolArtifacts -Paths $paths -DllSrcPath $dllSrc
@@ -1519,6 +1554,13 @@ function Install-Tool {
     Write-AppxManifest -Config $cfg -Paths $paths
     $cert = Ensure-SigningCert -Paths $paths
     Pack-AndRegisterMsix -Paths $paths -Cert $cert
+
+    # Legacy sweep runs AFTER the new install is fully registered. This avoids
+    # a window where the legacy CLSID {E3C26D71-...} would point at a deleted
+    # DLL path during an in-place upgrade. By the time the sweep runs, both
+    # Register-ToolComClass and the new AppX manifest have already pointed the
+    # CLSID at the new DLL, so removing the legacy artifacts is safe.
+    if ($Slug -eq "claude-code") { Invoke-LegacyClaudeSweep }
 
     Write-Host "  $Slug installed." -ForegroundColor Green
 }
@@ -1530,6 +1572,12 @@ Replace the existing `Invoke-Main` function body with:
 
 ```powershell
 function Invoke-Main {
+    # Enforce elevation here (not via #Requires) so dot-sourcing for unit tests works
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        throw "install.ps1 must be run from an elevated PowerShell session (Run as Administrator)."
+    }
+
     if ($ToolName) {
         if ($Uninstall) {
             Write-Host "Uninstall pipeline — not yet implemented" -ForegroundColor Yellow
@@ -1943,12 +1991,14 @@ param(
     [string]$ClaudePath
 )
 
-$forwardArgs = @("-ToolName", "claude-code")
-if ($Uninstall)  { $forwardArgs += "-Uninstall" }
-if ($ClaudePath) { $forwardArgs += @("-ExecutablePath", $ClaudePath) }
+$forwardArgs = @{ ToolName = "claude-code" }
+if ($Uninstall)  { $forwardArgs.Uninstall      = $true }
+if ($ClaudePath) { $forwardArgs.ExecutablePath = $ClaudePath }
 
 & (Join-Path $PSScriptRoot "install.ps1") @forwardArgs
 ```
+
+> **Important:** Use hashtable splatting (`@{ key = value }`) — NOT array splatting (`@("-ToolName", "claude-code")`). Array splatting binds positionally, so the array form would make `-ToolName` the literal value of `$ToolName` inside `install.ps1` and push `claude-code` into the next positional parameter (`$ConfigFile`). This bit us during Task 14 verification.
 
 - [ ] **Step 2: Verify shim dispatches correctly (dry run)**
 
