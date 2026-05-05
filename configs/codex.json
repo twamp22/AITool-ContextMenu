@@ -14,9 +14,9 @@
       "args": ""
     },
     {
-      "title": "Open (Auto-approve)",
-      "tooltip": "Launch Codex with --auto-approve",
-      "args": "--auto-approve"
+      "title": "Open (Bypass)",
+      "tooltip": "Launch Codex with --dangerously-bypass-approvals-and-sandbox",
+      "args": "--dangerously-bypass-approvals-and-sandbox"
     }
   ]
 }

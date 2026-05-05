@@ -665,9 +665,9 @@ Omits `guid` (will be derived via UUIDv5) and `packageName` (will be defaulted).
       "args": ""
     },
     {
-      "title": "Open (Auto-approve)",
-      "tooltip": "Launch Codex with --auto-approve",
-      "args": "--auto-approve"
+      "title": "Open (Bypass)",
+      "tooltip": "Launch Codex with --dangerously-bypass-approvals-and-sandbox",
+      "args": "--dangerously-bypass-approvals-and-sandbox"
     }
   ]
 }
@@ -2054,7 +2054,7 @@ Adds a top-level Windows 11 right-click menu entry for AI coding CLI tools (Clau
 | Tool | Config | Default menu items |
 |---|---|---|
 | Claude Code | `configs/claude-code.json` | Open (Default), Open (Auto), Open (YOLO) |
-| Codex | `configs/codex.json` | Open (Default), Open (Auto-approve) |
+| Codex | `configs/codex.json` | Open (Default), Open (Bypass) |
 
 Multiple tools can be installed side-by-side — each gets its own top-level submenu.
 
