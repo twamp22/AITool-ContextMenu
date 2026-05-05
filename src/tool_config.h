@@ -9,6 +9,7 @@
 #define TOOL_CONFIG_H
 
 #define TOOL_EXE_PATH       L"claude.exe"
+#define TOOL_ICON_PATH      L"claude.exe"
 #define TOOL_PARENT_TITLE   L"Claude Code"
 #define TOOL_PARENT_TOOLTIP L"Claude Code options"
 

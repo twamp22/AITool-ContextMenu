@@ -178,6 +178,7 @@ function Write-ToolConfigHeader {
     param($Config, $Paths)
 
     $exeEscaped     = ConvertTo-CEscapedWString -S $Paths.ExePath
+    $iconEscaped    = ConvertTo-CEscapedWString -S (Join-Path $Paths.InstallDir "$($Paths.Slug).ico")
     $parentTitle    = ConvertTo-CEscapedWString -S $Config.parentMenu.title
     $parentTooltip  = ConvertTo-CEscapedWString -S $Config.parentMenu.tooltip
     $guidInitializer = Format-GuidAsCInitializer -GuidString $Paths.Guid
@@ -198,6 +199,7 @@ function Write-ToolConfigHeader {
 #define TOOL_CONFIG_H
 
 #define TOOL_EXE_PATH       L"$exeEscaped"
+#define TOOL_ICON_PATH      L"$iconEscaped"
 #define TOOL_PARENT_TITLE   L"$parentTitle"
 #define TOOL_PARENT_TOOLTIP L"$parentTooltip"
 

@@ -14,6 +14,7 @@ static const IID IID_IEnumExplorerCommand = {
 };
 
 static const wchar_t TOOL_EXE[] = TOOL_EXE_PATH;
+static const wchar_t TOOL_ICON[] = TOOL_ICON_PATH;
 static LONG g_dllRef = 0;
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
@@ -88,7 +89,7 @@ static HRESULT STDMETHODCALLTYPE Sub_GetTitle(IExplorerCommand *This, IShellItem
 static HRESULT STDMETHODCALLTYPE Sub_GetIcon(IExplorerCommand *This, IShellItemArray *p, LPWSTR *out) {
     (void)This; (void)p;
     wchar_t buf[MAX_PATH + 8];
-    wsprintfW(buf, L"%s,0", TOOL_EXE);
+    wsprintfW(buf, L"%s,0", TOOL_ICON);
     return SHStrDupW(buf, out);
 }
 
@@ -245,7 +246,7 @@ static HRESULT STDMETHODCALLTYPE Par_GetTitle(IExplorerCommand *This, IShellItem
 static HRESULT STDMETHODCALLTYPE Par_GetIcon(IExplorerCommand *This, IShellItemArray *p, LPWSTR *out) {
     (void)This; (void)p;
     wchar_t buf[MAX_PATH + 8];
-    wsprintfW(buf, L"%s,0", TOOL_EXE);
+    wsprintfW(buf, L"%s,0", TOOL_ICON);
     return SHStrDupW(buf, out);
 }
 
